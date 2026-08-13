@@ -940,6 +940,7 @@ impl<'d> Att<'d> {
     }
 
     /// Decode an ATT PDU from a byte buffer
+    #[allow(clippy::manual_is_multiple_of)] // Keep the workspace's Rust 1.85 MSRV.
     pub fn decode(data: &'d [u8]) -> Result<Att<'d>, codec::Error> {
         let mut r = ReadCursor::new(data);
         let opcode: u8 = r.read()?;

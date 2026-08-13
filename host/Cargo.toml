@@ -27,6 +27,7 @@ embassy-time = "0.5"
 embassy-futures = "0.1"
 futures = { version = "0.3", default-features = false }
 heapless = "0.9"
+portable-atomic = { version = "1.15", features = ["critical-section"] }
 trouble-host-macros = { path = "../host-macros", version = "0.3.0", optional = true }
 p256 = { version = "0.13.2", default-features = false, features = ["ecdh","arithmetic"], optional = true }
 rand_core = "0.6"
@@ -77,6 +78,9 @@ connection-metrics = []
 # Enable additional channel metrics
 channel-metrics = []
 security = [ "dep:p256", "dep:aes", "dep:cmac", "dep:rand_chacha", "gatt", "dep:rand" ]
+# Let an application collect the six passkey digits asynchronously instead of
+# blocking the GATT connection task while SMP is waiting for user input.
+interactive-passkey = ["security"]
 # For development. Disable security manager cryptographically secure pseudorandom number
 # generator (CSPRNG) to require a cryptographically secure seed
 dev-disable-csprng-seed-requirement = []

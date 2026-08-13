@@ -59,6 +59,8 @@ pub mod advertise;
 pub mod connection;
 #[cfg(feature = "gatt")]
 pub mod gap;
+#[cfg(feature = "interactive-passkey")]
+pub mod interactive_passkey;
 pub mod l2cap;
 #[cfg(feature = "scan")]
 pub mod scan;

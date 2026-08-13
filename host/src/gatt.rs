@@ -8,6 +8,8 @@ use bt_hci::param::{ConnHandle, PhyKind, Status};
 use bt_hci::uuid::declarations::{CHARACTERISTIC, PRIMARY_SERVICE};
 use bt_hci::uuid::descriptors::CLIENT_CHARACTERISTIC_CONFIGURATION;
 use embassy_futures::select::{select, Either};
+#[cfg(feature = "interactive-passkey")]
+use embassy_futures::select::{select3, Either3};
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::channel::Channel;
 use embassy_sync::pubsub::{self, PubSubChannel, WaitResult};
@@ -104,6 +106,56 @@ pub enum GattConnectionEvent<'stack, 'server, P: PacketPool> {
     PairingFailed(Error),
 }
 
+fn connection_event<'stack, 'server, P: PacketPool>(event: ConnectionEvent) -> GattConnectionEvent<'stack, 'server, P> {
+    match event {
+        ConnectionEvent::Disconnected { reason } => GattConnectionEvent::Disconnected { reason },
+        ConnectionEvent::ConnectionParamsUpdated {
+            conn_interval,
+            peripheral_latency,
+            supervision_timeout,
+        } => GattConnectionEvent::ConnectionParamsUpdated {
+            conn_interval,
+            peripheral_latency,
+            supervision_timeout,
+        },
+        ConnectionEvent::RequestConnectionParams {
+            min_connection_interval,
+            max_connection_interval,
+            max_latency,
+            supervision_timeout,
+        } => GattConnectionEvent::RequestConnectionParams {
+            min_connection_interval,
+            max_connection_interval,
+            max_latency,
+            supervision_timeout,
+        },
+        ConnectionEvent::PhyUpdated { tx_phy, rx_phy } => GattConnectionEvent::PhyUpdated { tx_phy, rx_phy },
+        ConnectionEvent::DataLengthUpdated {
+            max_tx_octets,
+            max_tx_time,
+            max_rx_octets,
+            max_rx_time,
+        } => GattConnectionEvent::DataLengthUpdated {
+            max_tx_octets,
+            max_tx_time,
+            max_rx_octets,
+            max_rx_time,
+        },
+        #[cfg(feature = "security")]
+        ConnectionEvent::PassKeyDisplay(key) => GattConnectionEvent::PassKeyDisplay(key),
+        #[cfg(feature = "security")]
+        ConnectionEvent::PassKeyConfirm(key) => GattConnectionEvent::PassKeyConfirm(key),
+        #[cfg(feature = "security")]
+        ConnectionEvent::PassKeyInput => GattConnectionEvent::PassKeyInput,
+        #[cfg(feature = "security")]
+        ConnectionEvent::PairingComplete { security_level, bond } => {
+            GattConnectionEvent::PairingComplete { security_level, bond }
+        }
+        #[cfg(feature = "security")]
+        ConnectionEvent::PairingFailed(err) => GattConnectionEvent::PairingFailed(err),
+    }
+}
+
 /// Used to manage a GATT connection with a client.
 pub struct GattConnection<'stack, 'server, P: PacketPool> {
     connection: Connection<'stack, P>,
@@ -147,63 +199,67 @@ impl<'stack, 'server, P: PacketPool> GattConnection<'stack, 'server, P> {
     /// Wait for the next GATT connection event.
     ///
     /// Uses the attribute server to handle the protocol.
+    #[allow(clippy::never_loop)] // The loop is used by the interactive-passkey build.
     pub async fn next(&self) -> GattConnectionEvent<'stack, 'server, P> {
-        match select(self.connection.next(), self.connection.next_gatt()).await {
-            Either::First(event) => match event {
-                ConnectionEvent::Disconnected { reason } => GattConnectionEvent::Disconnected { reason },
-                ConnectionEvent::ConnectionParamsUpdated {
-                    conn_interval,
-                    peripheral_latency,
-                    supervision_timeout,
-                } => GattConnectionEvent::ConnectionParamsUpdated {
-                    conn_interval,
-                    peripheral_latency,
-                    supervision_timeout,
-                },
-                ConnectionEvent::RequestConnectionParams {
-                    min_connection_interval,
-                    max_connection_interval,
-                    max_latency,
-                    supervision_timeout,
-                } => GattConnectionEvent::RequestConnectionParams {
-                    min_connection_interval,
-                    max_connection_interval,
-                    max_latency,
-                    supervision_timeout,
-                },
-                ConnectionEvent::PhyUpdated { tx_phy, rx_phy } => GattConnectionEvent::PhyUpdated { tx_phy, rx_phy },
-                ConnectionEvent::DataLengthUpdated {
-                    max_tx_octets,
-                    max_tx_time,
-                    max_rx_octets,
-                    max_rx_time,
-                } => GattConnectionEvent::DataLengthUpdated {
-                    max_tx_octets,
-                    max_tx_time,
-                    max_rx_octets,
-                    max_rx_time,
-                },
-
-                #[cfg(feature = "security")]
-                ConnectionEvent::PassKeyDisplay(key) => GattConnectionEvent::PassKeyDisplay(key),
-
-                #[cfg(feature = "security")]
-                ConnectionEvent::PassKeyConfirm(key) => GattConnectionEvent::PassKeyConfirm(key),
-
-                #[cfg(feature = "security")]
-                ConnectionEvent::PassKeyInput => GattConnectionEvent::PassKeyInput,
-
-                #[cfg(feature = "security")]
-                ConnectionEvent::PairingComplete { security_level, bond } => {
-                    GattConnectionEvent::PairingComplete { security_level, bond }
+        loop {
+            #[cfg(feature = "interactive-passkey")]
+            if crate::interactive_passkey::is_active() {
+                match select3(
+                    self.connection.next(),
+                    self.connection.next_gatt(),
+                    crate::interactive_passkey::wait(),
+                )
+                .await
+                {
+                    Either3::First(event) => {
+                        if matches!(
+                            &event,
+                            ConnectionEvent::Disconnected { .. }
+                                | ConnectionEvent::PairingComplete { .. }
+                                | ConnectionEvent::PairingFailed(_)
+                        ) {
+                            crate::interactive_passkey::end();
+                        }
+                        if matches!(&event, ConnectionEvent::PassKeyInput) {
+                            crate::interactive_passkey::begin();
+                            continue;
+                        }
+                        return connection_event(event);
+                    }
+                    Either3::Second(data) => {
+                        return GattConnectionEvent::Gatt {
+                            event: GattEvent::new(GattData::new(data, self.connection.clone()), self.server),
+                        };
+                    }
+                    Either3::Third(response) => {
+                        crate::interactive_passkey::end();
+                        let result = match response {
+                            Some(passkey) => self.connection.pass_key_input(passkey),
+                            None => self.connection.pass_key_cancel(),
+                        };
+                        if let Err(error) = result {
+                            warn!("[gatt] interactive passkey response failed: {:?}", error);
+                        }
+                        continue;
+                    }
                 }
+            }
 
-                #[cfg(feature = "security")]
-                ConnectionEvent::PairingFailed(err) => GattConnectionEvent::PairingFailed(err),
-            },
-            Either::Second(data) => GattConnectionEvent::Gatt {
-                event: GattEvent::new(GattData::new(data, self.connection.clone()), self.server),
-            },
+            match select(self.connection.next(), self.connection.next_gatt()).await {
+                Either::First(event) => {
+                    #[cfg(feature = "interactive-passkey")]
+                    if matches!(&event, ConnectionEvent::PassKeyInput) {
+                        crate::interactive_passkey::begin();
+                        continue;
+                    }
+                    return connection_event(event);
+                }
+                Either::Second(data) => {
+                    return GattConnectionEvent::Gatt {
+                        event: GattEvent::new(GattData::new(data, self.connection.clone()), self.server),
+                    };
+                }
+            }
         }
     }
 
