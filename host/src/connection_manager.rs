@@ -10,7 +10,6 @@ use embassy_sync::channel::Channel;
 use embassy_sync::waitqueue::WakerRegistration;
 #[cfg(feature = "security")]
 use embassy_time::TimeoutError;
-use portable_atomic::{AtomicU32, Ordering};
 
 use crate::connection::{Connection, ConnectionEvent, SecurityLevel};
 use crate::host::EventHandler;
@@ -19,31 +18,6 @@ use crate::prelude::sar::PacketReassembly;
 #[cfg(feature = "security")]
 use crate::security_manager::{SecurityEventData, SecurityManager};
 use crate::{config, Error, Identity, PacketPool};
-
-const CREDIT_DIAGNOSTICS_MAGIC: u32 = 0x5443_4431; // "TCD1"
-#[used]
-#[cfg_attr(target_os = "none", unsafe(export_name = "TROUBLE_CREDIT_PERSISTENT_DIAGNOSTICS"))]
-#[cfg_attr(target_os = "none", unsafe(link_section = ".uninit.trouble_credit"))]
-static CREDIT_DIAGNOSTICS: [AtomicU32; 12] = [const { AtomicU32::new(0) }; 12];
-
-fn ensure_credit_diagnostics() {
-    if CREDIT_DIAGNOSTICS[0].load(Ordering::Relaxed) != CREDIT_DIAGNOSTICS_MAGIC {
-        for word in &CREDIT_DIAGNOSTICS[1..] {
-            word.store(0, Ordering::Relaxed);
-        }
-        CREDIT_DIAGNOSTICS[0].store(CREDIT_DIAGNOSTICS_MAGIC, Ordering::Release);
-    }
-}
-
-fn credit_increment(index: usize) {
-    ensure_credit_diagnostics();
-    CREDIT_DIAGNOSTICS[index].fetch_add(1, Ordering::Relaxed);
-}
-
-fn credit_store(index: usize, value: usize) {
-    ensure_credit_diagnostics();
-    CREDIT_DIAGNOSTICS[index].store(value as u32, Ordering::Relaxed);
-}
 
 struct State<'d, P> {
     connections: &'d mut [ConnectionStorage<P>],
@@ -448,7 +422,6 @@ impl<'d, P: PacketPool> ConnectionManager<'d, P> {
     }
 
     pub(crate) fn set_link_credits(&self, credits: usize) {
-        credit_store(1, credits);
         let mut state = self.state.borrow_mut();
         state.default_link_credits = credits;
         for storage in state.connections.iter_mut() {
@@ -462,14 +435,11 @@ impl<'d, P: PacketPool> ConnectionManager<'d, P> {
     }
 
     pub(crate) fn confirm_sent(&self, handle: ConnHandle, packets: usize) -> Result<(), Error> {
-        credit_increment(2);
         let mut state = self.state.borrow_mut();
         for storage in state.connections.iter_mut() {
             match storage.state {
                 ConnectionState::Connected if handle == storage.handle.unwrap() => {
-                    credit_store(3, storage.link_credits);
                     storage.link_credits += packets;
-                    credit_store(4, storage.link_credits);
                     storage.link_credit_waker.wake();
                     return Ok(());
                 }
@@ -485,22 +455,15 @@ impl<'d, P: PacketPool> ConnectionManager<'d, P> {
         packets: usize,
         cx: Option<&mut Context<'_>>,
     ) -> Poll<Result<PacketGrant<'_, 'd, P::Packet>, Error>> {
-        credit_increment(5);
-        credit_store(9, packets);
-        credit_store(10, handle.raw() as usize);
         let mut state = self.state.borrow_mut();
         for storage in state.connections.iter_mut() {
             match storage.state {
                 ConnectionState::Connected if storage.handle.unwrap() == handle => {
-                    credit_store(6, storage.link_credits);
                     if packets <= storage.link_credits {
                         storage.link_credits -= packets;
-                        credit_store(11, storage.link_credits);
-                        credit_increment(7);
 
                         return Poll::Ready(Ok(PacketGrant::new(&self.state, handle, packets)));
                     } else {
-                        credit_increment(8);
                         if let Some(cx) = cx {
                             storage.link_credit_waker.register(cx.waker());
                         }

@@ -39,7 +39,6 @@ use embassy_sync::once_lock::OnceLock;
 use embassy_sync::waitqueue::WakerRegistration;
 use embassy_time::Duration;
 use futures::pin_mut;
-use portable_atomic::{AtomicU32, Ordering};
 
 use crate::att::{AttClient, AttServer};
 use crate::channel_manager::{ChannelManager, ChannelStorage};
@@ -55,31 +54,6 @@ use crate::types::l2cap::{
     L2CAP_CID_DYN_START, L2CAP_CID_LE_U_SECURITY_MANAGER, L2CAP_CID_LE_U_SIGNAL,
 };
 use crate::{att, Address, BleHostError, Error, PacketPool, Stack};
-
-const HCI_FLOW_DIAGNOSTICS_MAGIC: u32 = 0x5448_4631; // "THF1"
-#[used]
-#[cfg_attr(target_os = "none", unsafe(export_name = "TROUBLE_HCI_FLOW_PERSISTENT_DIAGNOSTICS"))]
-#[cfg_attr(target_os = "none", unsafe(link_section = ".uninit.trouble_hci_flow"))]
-static HCI_FLOW_DIAGNOSTICS: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
-
-fn ensure_hci_flow_diagnostics() {
-    if HCI_FLOW_DIAGNOSTICS[0].load(Ordering::Relaxed) != HCI_FLOW_DIAGNOSTICS_MAGIC {
-        for word in &HCI_FLOW_DIAGNOSTICS[1..] {
-            word.store(0, Ordering::Relaxed);
-        }
-        HCI_FLOW_DIAGNOSTICS[0].store(HCI_FLOW_DIAGNOSTICS_MAGIC, Ordering::Release);
-    }
-}
-
-fn hci_flow_increment(index: usize) {
-    ensure_hci_flow_diagnostics();
-    HCI_FLOW_DIAGNOSTICS[index].fetch_add(1, Ordering::Relaxed);
-}
-
-fn hci_flow_store(index: usize, value: u32) {
-    ensure_hci_flow_diagnostics();
-    HCI_FLOW_DIAGNOSTICS[index].store(value, Ordering::Relaxed);
-}
 
 /// A BLE Host.
 ///
@@ -1015,23 +989,14 @@ impl<'d, C: Controller, P: PacketPool> RxRunner<'d, C, P> {
                             m.disconnect_events = m.disconnect_events.wrapping_add(1);
                         }
                         EventKind::NumberOfCompletedPackets => {
-                            hci_flow_increment(1);
                             let c = unwrap!(NumberOfCompletedPackets::from_hci_bytes_complete(event.data));
-                            hci_flow_store(2, c.completed_packets.len() as u32);
                             // Explicitly ignoring for now
                             for entry in c.completed_packets.iter() {
                                 match (entry.handle(), entry.num_completed_packets()) {
                                     (Ok(handle), Ok(completed)) => {
-                                        hci_flow_store(3, handle.raw() as u32);
-                                        hci_flow_store(4, completed as u32);
-                                        if host.connections.confirm_sent(handle, completed as usize).is_ok() {
-                                            hci_flow_increment(5);
-                                        } else {
-                                            hci_flow_increment(6);
-                                        }
+                                        let _ = host.connections.confirm_sent(handle, completed as usize);
                                     }
                                     (Ok(handle), Err(e)) => {
-                                        hci_flow_increment(7);
                                         warn!("[host] error processing completed packets for {:?}: {:?}", handle, e);
                                     }
                                     _ => {}
