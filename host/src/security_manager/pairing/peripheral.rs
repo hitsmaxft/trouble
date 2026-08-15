@@ -104,6 +104,18 @@ struct PairingData {
 }
 
 impl PairingData {
+    fn compute_dh_key(&mut self) -> Result<(), Error> {
+        let secret_key = self.private_key.as_ref().ok_or(Error::InvalidValue)?;
+        let local_public_key = self.local_public_key.as_ref().ok_or(Error::InvalidValue)?;
+        let peer_public_key = self.peer_public_key.ok_or(Error::InvalidValue)?;
+        self.dh_key = Some(
+            secret_key
+                .dh_key_with_public(local_public_key, peer_public_key)
+                .ok_or(Error::Security(Reason::InvalidParameters))?,
+        );
+        Ok(())
+    }
+
     fn want_bonding(&self) -> bool {
         matches!(self.local_features.security_properties.bond(), BondingFlag::Bonding)
             && matches!(self.peer_features.security_properties.bond(), BondingFlag::Bonding)
@@ -521,11 +533,9 @@ impl Pairing {
         let peer_public_key = pairing_data
             .peer_public_key
             .ok_or(Error::Security(Reason::InvalidParameters))?;
-        pairing_data.dh_key = Some(
-            secret_key
-                .dh_key(peer_public_key)
-                .ok_or(Error::Security(Reason::InvalidParameters))?,
-        );
+        if !SecretKey::validate_peer_public_key(&public_key, peer_public_key) {
+            return Err(Error::Security(Reason::InvalidParameters));
+        }
         pairing_data.local_public_key = Some(public_key);
         pairing_data.private_key = Some(secret_key);
 
@@ -588,6 +598,7 @@ impl Pairing {
         ops: &mut OPS,
         pairing_data: &mut PairingData,
     ) -> Result<Step, Error> {
+        pairing_data.compute_dh_key()?;
         Self::compute_ltk(pairing_data)?;
         let expected_payload = pairing_data
             .mac_key

@@ -356,18 +356,40 @@ impl SecretKey {
     /// from the same secret key ([Vol 3] Part H, Section 2.3.5.6.1).
     #[must_use]
     pub fn dh_key(&self, pk: PublicKey) -> Option<DHKey> {
+        let local_public_key = self.public_key();
+        self.dh_key_with_public(&local_public_key, pk)
+    }
+
+    /// Computes a shared secret while reusing the already-generated local
+    /// public key.
+    pub(crate) fn dh_key_with_public(
+        &self,
+        local_public_key: &PublicKey,
+        pk: PublicKey,
+    ) -> Option<DHKey> {
+        let rpk = Self::validated_peer_public_key(local_public_key, pk)?;
+        Some(DHKey(ecdh::diffie_hellman(&self.0, rpk.as_affine())))
+    }
+
+    /// Validates a peer key before ECDH is deferred to a later SMP PDU.
+    pub(crate) fn validate_peer_public_key(local_public_key: &PublicKey, pk: PublicKey) -> bool {
+        Self::validated_peer_public_key(local_public_key, pk).is_some()
+    }
+
+    fn validated_peer_public_key(
+        local_public_key: &PublicKey,
+        pk: PublicKey,
+    ) -> Option<p256::PublicKey> {
         use p256::elliptic_curve::sec1::FromEncodedPoint;
-        if pk.is_debug() {
+        if pk.is_debug() || pk == *local_public_key {
             return None; // TODO: Compile-time option for debug-only mode
         }
 
         let (x, y) = (&pk.x.0 .0.into(), &pk.y.0.into());
         let rep = p256::EncodedPoint::from_affine_coordinates(x, y, false);
-        let lpk = p256::PublicKey::from_secret_scalar(&self.0);
         // Constant-time ops not required:
         // https://github.com/RustCrypto/traits/issues/1227
-        let rpk = Option::from(p256::PublicKey::from_encoded_point(&rep)).unwrap_or(lpk);
-        (rpk != lpk).then(|| DHKey(ecdh::diffie_hellman(&self.0, rpk.as_affine())))
+        Option::from(p256::PublicKey::from_encoded_point(&rep))
     }
 }
 
@@ -572,9 +594,19 @@ mod tests {
             ska.dh_key(pkb).unwrap().0.raw_secret_bytes(),
             dh_key.0.raw_secret_bytes()
         );
+        assert_eq!(
+            ska.dh_key_with_public(&pka, pkb)
+                .unwrap()
+                .0
+                .raw_secret_bytes(),
+            dh_key.0.raw_secret_bytes()
+        );
 
         assert!(!pkb.is_debug());
+        assert!(SecretKey::validate_peer_public_key(&pka, pkb));
         assert!(skb.dh_key(pkb).is_none());
+        assert!(!SecretKey::validate_peer_public_key(&pkb, pkb));
+        assert!(skb.dh_key_with_public(&pkb, pkb).is_none());
     }
 
     /// P-256 data set 2 ([Vol 2] Part G, Section 7.1.2.2).
