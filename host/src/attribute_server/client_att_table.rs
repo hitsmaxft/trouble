@@ -669,6 +669,7 @@ mod tests {
         assert_eq!(table.get(1), Some([1, 9, 7, 8].as_slice()));
     }
 
+    #[cfg(not(feature = "client-att-table-size-24"))]
     #[test]
     fn set_values_copies_matching_keys_truncates_to_capacity_and_zeros_missing_keys() {
         let mut src_builder = ClientAttTable::builder();

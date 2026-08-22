@@ -23,8 +23,15 @@ use embassy_sync::waitqueue::WakerRegistration;
 use embassy_time::{Instant, TimeoutError, WithTimeout};
 use heapless::VecView;
 pub use pairing::OobData;
+#[cfg(feature = "security-compact-rng")]
+use rand_chacha::ChaCha12Core;
+#[cfg(not(feature = "security-compact-rng"))]
 use rand_chacha::ChaCha12Rng;
+#[cfg(feature = "security-compact-rng")]
+use rand_core::block::BlockRngCore;
 use rand_core::SeedableRng;
+#[cfg(feature = "security-compact-rng")]
+use rand_core::{CryptoRng, RngCore};
 use types::Command;
 pub use types::{PassKey, Reason};
 
@@ -184,10 +191,70 @@ impl<P: PacketPool> TxPacket<P> {
     }
 }
 
+#[cfg(not(feature = "security-compact-rng"))]
+type SecurityRng = ChaCha12Rng;
+
+/// ChaCha12 without `BlockRng`'s retained 256-byte output cache.
+#[cfg(feature = "security-compact-rng")]
+struct SecurityRng {
+    core: ChaCha12Core,
+}
+
+#[cfg(feature = "security-compact-rng")]
+impl SeedableRng for SecurityRng {
+    type Seed = [u8; 32];
+
+    fn from_seed(seed: Self::Seed) -> Self {
+        Self {
+            core: ChaCha12Core::from_seed(seed),
+        }
+    }
+}
+
+#[cfg(feature = "security-compact-rng")]
+impl RngCore for SecurityRng {
+    fn next_u32(&mut self) -> u32 {
+        let mut bytes = [0u8; 4];
+        self.fill_bytes(&mut bytes);
+        u32::from_le_bytes(bytes)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut bytes = [0u8; 8];
+        self.fill_bytes(&mut bytes);
+        u64::from_le_bytes(bytes)
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        let mut offset = 0;
+        while offset < dest.len() {
+            let mut block = <ChaCha12Core as BlockRngCore>::Results::default();
+            self.core.generate(&mut block);
+            for word in block.as_ref() {
+                let bytes = word.to_le_bytes();
+                let count = (dest.len() - offset).min(bytes.len());
+                dest[offset..offset + count].copy_from_slice(&bytes[..count]);
+                offset += count;
+                if offset == dest.len() {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "security-compact-rng")]
+impl CryptoRng for SecurityRng {}
+
 /// Inner mutable state of the security manager
 struct Inner {
     /// Random generator
-    rng: ChaCha12Rng,
+    rng: SecurityRng,
     /// Persistent LESC keypair (generated once when RNG is seeded)
     secret_key: crypto::SecretKey,
     /// Corresponding public key
@@ -623,7 +690,7 @@ pub struct SecurityManager<'d> {
 impl<'d> SecurityManager<'d> {
     /// Create a new SecurityManager
     pub(crate) fn new(bonds: &'d RefCell<VecView<BondInformation>>) -> Self {
-        let mut rng = ChaCha12Rng::from_seed([0u8; 32]);
+        let mut rng = SecurityRng::from_seed([0u8; 32]);
         let secret_key = crypto::SecretKey::new(&mut rng);
         let public_key = secret_key.public_key();
         Self {
@@ -658,7 +725,7 @@ impl<'d> SecurityManager<'d> {
     /// Seed the security manager's CSPRNG and regenerate the persistent LESC keypair.
     pub(crate) fn set_random_generator_seed(&self, random_seed: [u8; 32]) {
         let mut inner = self.inner.borrow_mut();
-        inner.rng = ChaCha12Rng::from_seed(random_seed);
+        inner.rng = SecurityRng::from_seed(random_seed);
         inner.secret_key = crypto::SecretKey::new(&mut inner.rng);
         inner.public_key = inner.secret_key.public_key();
     }
@@ -1290,7 +1357,6 @@ mod tests {
 
     use bt_hci::param::{ConnHandle, LeConnRole};
     use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-    use rand_chacha::ChaCha12Rng;
     use rand_core::SeedableRng;
 
     use super::*;
@@ -1307,7 +1373,7 @@ mod tests {
     }
 
     fn test_inner(peer_address: Address) -> Inner {
-        let mut rng = ChaCha12Rng::from_seed([7; 32]);
+        let mut rng = SecurityRng::from_seed([7; 32]);
         let secret_key = crypto::SecretKey::new(&mut rng);
         let public_key = secret_key.public_key();
         Inner {

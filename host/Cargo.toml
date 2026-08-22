@@ -71,6 +71,12 @@ peripheral = []
 central = []
 # Enable GATT support
 gatt = []
+# Store attribute type UUIDs as two bytes. This is only valid for products
+# whose complete GATT database uses Bluetooth 16-bit UUIDs.
+gatt-uuid16-only = ["gatt"]
+# Limit inline attribute values to eight bytes. Larger mutable values retain
+# external storage and read-only values retain their immutable slice.
+gatt-small-data-8 = ["gatt"]
 # Enable scan support
 scan = ["central"]
 # Enable macros
@@ -82,6 +88,16 @@ connection-metrics = []
 # Enable additional channel metrics
 channel-metrics = []
 security = [ "dep:p256", "dep:aes", "dep:cmac", "dep:rand_core", "dep:rand_chacha", "dep:rand" ]
+# Keep only the ChaCha12 core state instead of BlockRng's retained 256-byte
+# output cache. This trades a small amount of pairing-time CPU/stack for SRAM.
+security-compact-rng = ["security"]
+# Product profile for controllers that expose only legacy advertising and an
+# HCI ACL payload no larger than 27 bytes. The caller must enforce the same
+# capability boundary in its controller backend.
+hci-rx-buffer-64 = []
+# Static-address products can keep LE Secure Connections and bond/LTK storage
+# without retaining the controller resolving-list/RPA machinery.
+security-no-address-privacy = ["security"]
 # Enable LE Legacy Pairing (BLE 4.0/4.1 fallback when peer doesn't support Secure Connections)
 legacy-pairing = ["security"]
 # Enable Isochronous endpoint support
@@ -186,6 +202,7 @@ gatt-client-notification-queue-size-512 = []
 client-att-table-size-2 = []
 client-att-table-size-8 = []
 client-att-table-size-16 = []
+client-att-table-size-24 = []
 client-att-table-size-32 = []
 client-att-table-size-64 = [] # Default
 client-att-table-size-128 = []

@@ -1,7 +1,7 @@
 //! BleHost
 //!
 //! The host module contains the main entry point for the TrouBLE host.
-#[cfg(feature = "security")]
+#[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
 use core::cell::Cell;
 use core::cell::RefCell;
 use core::future::poll_fn;
@@ -13,14 +13,17 @@ use bt_hci::cmd::controller_baseband::{
     SetEventMaskPage2,
 };
 use bt_hci::cmd::info::ReadBdAddr;
+use bt_hci::cmd::le::LeCreateConnCancel;
 #[cfg(feature = "security")]
+use bt_hci::cmd::le::LeRand;
+#[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
 use bt_hci::cmd::le::{
-    LeAddDeviceToResolvingList, LeClearResolvingList, LeRand, LeRemoveDeviceFromResolvingList,
-    LeSetAddrResolutionEnable, LeSetPrivacyMode, LeSetResolvablePrivateAddrTimeout,
+    LeAddDeviceToResolvingList, LeClearResolvingList, LeRemoveDeviceFromResolvingList, LeSetAddrResolutionEnable,
+    LeSetPrivacyMode, LeSetResolvablePrivateAddrTimeout,
 };
 use bt_hci::cmd::le::{
-    LeConnUpdate, LeCreateConnCancel, LeReadBufferSize, LeReadFilterAcceptListSize, LeSetAdvEnable, LeSetEventMask,
-    LeSetExtAdvEnable, LeSetExtScanEnable, LeSetRandomAddr, LeSetScanEnable,
+    LeConnUpdate, LeReadBufferSize, LeReadFilterAcceptListSize, LeSetAdvEnable, LeSetEventMask, LeSetExtAdvEnable,
+    LeSetExtScanEnable, LeSetRandomAddr, LeSetScanEnable,
 };
 use bt_hci::cmd::link_control::Disconnect;
 use bt_hci::cmd::{self, AsyncCmd, SyncCmd};
@@ -40,17 +43,22 @@ use bt_hci::event::le::{
 #[cfg(feature = "iso")]
 use bt_hci::event::le::{LeCisEstablished, LeCisRequest};
 use bt_hci::event::{DisconnectionComplete, EventKind, NumberOfCompletedPackets, Vendor};
-#[cfg(feature = "security")]
+#[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
 use bt_hci::param::BdAddr;
+#[cfg(feature = "scan")]
+use bt_hci::param::FilterDuplicates;
 use bt_hci::param::{
-    AddrKind, AdvHandle, AdvSet, ConnHandle, DisconnectReason, EventMask, EventMaskPage2, FilterDuplicates, LeConnRole,
-    LeEventMask, Status,
+    AddrKind, AdvHandle, AdvSet, ConnHandle, DisconnectReason, EventMask, EventMaskPage2, LeConnRole, LeEventMask,
+    Status,
 };
 use bt_hci::{ControllerToHostPacket, FromHciBytes, WriteHci};
 use embassy_futures::select::{select3, select5, Either3, Either5};
-#[cfg(any(feature = "scan", feature = "security"))]
+#[cfg(any(
+    feature = "scan",
+    all(feature = "security", not(feature = "security-no-address-privacy"))
+))]
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-#[cfg(feature = "security")]
+#[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
 use embassy_sync::mutex::Mutex;
 use embassy_sync::once_lock::OnceLock;
 #[cfg(feature = "scan")]
@@ -79,7 +87,7 @@ use crate::types::l2cap::{
 };
 use crate::{att, Address, BleHostError, Error, PacketPool};
 
-#[cfg(feature = "security")]
+#[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
 #[derive(Clone, Copy)]
 pub(crate) enum ResolvingListUpdate {
     FullSync,
@@ -87,13 +95,13 @@ pub(crate) enum ResolvingListUpdate {
     Remove(crate::Identity),
 }
 
-#[cfg(feature = "security")]
+#[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
 pub(crate) struct ResolvingListSignal {
     state: Option<ResolvingListUpdate>,
     waker: WakerRegistration,
 }
 
-#[cfg(feature = "security")]
+#[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
 impl ResolvingListSignal {
     const fn new() -> Self {
         Self {
@@ -134,15 +142,23 @@ pub(crate) struct HostState<'d, P: PacketPool> {
     pub(crate) channels: ChannelManager<'d, P>,
     pub(crate) advertise_state: AdvState<'d>,
     pub(crate) advertise_command_state: CommandState<bool>,
+    #[cfg(any(
+        feature = "central",
+        all(feature = "security", not(feature = "security-no-address-privacy"))
+    ))]
     pub(crate) connect_command_state: CommandState<bool>,
+    #[cfg(any(
+        feature = "scan",
+        all(feature = "security", not(feature = "security-no-address-privacy"))
+    ))]
     pub(crate) scan_command_state: CommandState<bool>,
-    #[cfg(feature = "security")]
+    #[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
     pub(crate) command_request_gate: Mutex<NoopRawMutex, ()>,
-    #[cfg(feature = "security")]
+    #[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
     pub(crate) rpa_timeout: Cell<embassy_time::Duration>,
     #[cfg(all(feature = "security", feature = "central"))]
     pub(crate) rpa_expires_at: Cell<Instant>,
-    #[cfg(feature = "security")]
+    #[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
     pub(crate) resolving_list_state: RefCell<ResolvingListSignal>,
     #[cfg(feature = "scan")]
     pub(crate) scan_timeout: Signal<NoopRawMutex, ()>,
@@ -167,15 +183,23 @@ impl<'d, P: PacketPool> HostState<'d, P> {
             channels: ChannelManager::new(channels),
             advertise_state: AdvState::new(advertise_handles),
             advertise_command_state: CommandState::new(),
+            #[cfg(any(
+                feature = "scan",
+                all(feature = "security", not(feature = "security-no-address-privacy"))
+            ))]
             scan_command_state: CommandState::new(),
+            #[cfg(any(
+                feature = "central",
+                all(feature = "security", not(feature = "security-no-address-privacy"))
+            ))]
             connect_command_state: CommandState::new(),
-            #[cfg(feature = "security")]
+            #[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
             command_request_gate: Mutex::new(()),
-            #[cfg(feature = "security")]
+            #[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
             rpa_timeout: Cell::new(embassy_time::Duration::from_secs(900)),
             #[cfg(all(feature = "security", feature = "central"))]
             rpa_expires_at: Cell::new(Instant::from_ticks(0)),
-            #[cfg(feature = "security")]
+            #[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
             resolving_list_state: RefCell::new(ResolvingListSignal::new()),
             #[cfg(feature = "scan")]
             scan_timeout: Signal::new(),
@@ -319,6 +343,7 @@ where
         self.state.address
     }
 
+    #[cfg(feature = "central")]
     pub(crate) fn connect_command_state(&self) -> &CommandState<bool> {
         &self.state.connect_command_state
     }
@@ -327,6 +352,7 @@ where
         &self.state.advertise_command_state
     }
 
+    #[cfg(feature = "scan")]
     pub(crate) fn scan_command_state(&self) -> &'d CommandState<bool> {
         &self.state.scan_command_state
     }
@@ -348,12 +374,12 @@ where
         &self.state.scan_timeout
     }
 
-    #[cfg(feature = "security")]
+    #[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
     pub(crate) fn resolving_list_state(&self) -> &RefCell<ResolvingListSignal> {
         &self.state.resolving_list_state
     }
 
-    #[cfg(feature = "security")]
+    #[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
     pub(crate) fn rpa_timeout(&self) -> &Cell<Duration> {
         &self.state.rpa_timeout
     }
@@ -366,12 +392,14 @@ where
 {
     /// Poll whether any command should be cancelled or the resolving list should be synced.
     fn poll_cancelled(&self, cx: &mut Context<'_>) -> Poll<CancelledCommandState> {
+        #[cfg(feature = "central")]
         if let Poll::Ready(ctx) = self.state.connect_command_state.poll_cancelled(cx) {
             return Poll::Ready(CancelledCommandState::Connect(ctx));
         }
         if let Poll::Ready(ctx) = self.state.advertise_command_state.poll_cancelled(cx) {
             return Poll::Ready(CancelledCommandState::Advertise(ctx));
         }
+        #[cfg(feature = "scan")]
         if let Poll::Ready(ctx) = self.state.scan_command_state.poll_cancelled(cx) {
             return Poll::Ready(CancelledCommandState::Scan(ctx));
         }
@@ -381,7 +409,7 @@ where
             return Poll::Ready(CancelledCommandState::RotateRpa);
         }
 
-        #[cfg(feature = "security")]
+        #[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
         if self.state.connect_command_state.is_idle()
             && self.state.advertise_command_state.is_idle()
             && self.state.scan_command_state.is_idle()
@@ -397,12 +425,15 @@ where
     /// Check whether BLE address privacy is enabled.
     #[cfg(feature = "security")]
     pub(crate) fn is_privacy_enabled(&self) -> bool {
+        #[cfg(feature = "security-no-address-privacy")]
+        return false;
+        #[cfg(not(feature = "security-no-address-privacy"))]
         self.state.connections.security_manager.get_local_irk().is_some()
     }
 
     /// Get the appropriate own address kind based on the host address and privacy state.
     pub(crate) fn own_addr_kind(&self) -> AddrKind {
-        #[cfg(feature = "security")]
+        #[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
         if self.is_privacy_enabled() {
             return if self.state.address.is_some() {
                 AddrKind::RESOLVABLE_PRIVATE_OR_RANDOM
@@ -415,7 +446,7 @@ where
 
     /// Atomically mark an address-using procedure active relative to RPA rotation.
     pub(crate) async fn request_operation<CTX: Clone + Copy>(&self, state: &CommandState<CTX>, ctx: CTX) {
-        #[cfg(feature = "security")]
+        #[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
         let _guard = self.state.command_request_gate.lock().await;
         state.request(ctx).await;
     }
@@ -461,7 +492,7 @@ where
     }
 
     /// Sync the controller's resolving list based on a pending update.
-    #[cfg(feature = "security")]
+    #[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
     pub(crate) async fn sync_resolving_list(&self, update: ResolvingListUpdate) -> Result<(), BleHostError<T::Error>>
     where
         T: ControllerCmdSync<LeClearResolvingList>
@@ -546,7 +577,7 @@ where
     }
 
     /// Full clear-and-rebuild of the resolving list.
-    #[cfg(feature = "security")]
+    #[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
     async fn full_resolving_list_sync(
         &self,
         local_irk: Option<crate::security_manager::IdentityResolvingKey>,
@@ -687,10 +718,18 @@ where
             }
             Err(bt_hci::param::Error::UNKNOWN_CONN_IDENTIFIER) => {
                 warn!("[host] connect cancelled");
+                #[cfg(any(
+                    feature = "central",
+                    all(feature = "security", not(feature = "security-no-address-privacy"))
+                ))]
                 self.state.connect_command_state.canceled();
             }
             Err(e) => {
                 warn!("Error connection complete event: {:?}", e);
+                #[cfg(any(
+                    feature = "central",
+                    all(feature = "security", not(feature = "security-no-address-privacy"))
+                ))]
                 self.state.connect_command_state.canceled();
             }
         }
@@ -1332,7 +1371,10 @@ impl<'d, C: Controller, P: PacketPool> RxRunner<'d, C, P> {
     where
         C: ControllerCmdSync<Disconnect>,
     {
+        #[cfg(not(feature = "hci-rx-buffer-64"))]
         const MAX_HCI_PACKET_LEN: usize = 259;
+        #[cfg(feature = "hci-rx-buffer-64")]
+        const MAX_HCI_PACKET_LEN: usize = 64;
         let host = &self.host;
         // use embassy_time::Instant;
         // let mut last = Instant::now();
@@ -1401,6 +1443,7 @@ impl<'d, C: Controller, P: PacketPool> RxRunner<'d, C, P> {
                                                 DisconnectReason::RemoteDeviceTerminatedConnLowResources,
                                             ))
                                             .await;
+                                        #[cfg(feature = "central")]
                                         host.state.connect_command_state.canceled();
                                     }
                                 }
@@ -1430,6 +1473,7 @@ impl<'d, C: Controller, P: PacketPool> RxRunner<'d, C, P> {
                                                 DisconnectReason::RemoteDeviceTerminatedConnLowResources,
                                             ))
                                             .await;
+                                        #[cfg(feature = "central")]
                                         host.state.connect_command_state.canceled();
                                     }
                                 }
@@ -1647,10 +1691,12 @@ impl<'d, C: Controller, P: PacketPool> RxRunner<'d, C, P> {
 }
 
 enum CancelledCommandState {
+    #[cfg(feature = "central")]
     Connect(bool),
     Advertise(bool),
+    #[cfg(feature = "scan")]
     Scan(bool),
-    #[cfg(feature = "security")]
+    #[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
     SyncResolvingList(ResolvingListUpdate),
     #[cfg(all(feature = "security", feature = "central"))]
     RotateRpa,
@@ -1815,7 +1861,7 @@ impl<'d, C: Controller, P: PacketPool> ControlRunner<'d, C, P> {
         }
 
         // Set default RPA timeout in controller
-        #[cfg(feature = "security")]
+        #[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
         {
             let timeout_secs = host.state.rpa_timeout.get().as_secs();
             LeSetResolvablePrivateAddrTimeout::new(bt_hci::param::Duration::from_secs(timeout_secs as u32))
@@ -1825,7 +1871,7 @@ impl<'d, C: Controller, P: PacketPool> ControlRunner<'d, C, P> {
         }
 
         // Initialize privacy: sync resolving list
-        #[cfg(feature = "security")]
+        #[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
         if host.is_privacy_enabled() {
             host.state.resolving_list_state.borrow_mut().clear();
             host.sync_resolving_list(ResolvingListUpdate::FullSync).await?;
@@ -1883,6 +1929,7 @@ impl<'d, C: Controller, P: PacketPool> ControlRunner<'d, C, P> {
                     request.confirm();
                 }
                 Either5::Third(action) => match action {
+                    #[cfg(feature = "central")]
                     CancelledCommandState::Connect(_) => {
                         trace!("[host] cancel connection create");
                         if let Err(err) = host.command(LeCreateConnCancel::new()).await {
@@ -1900,6 +1947,7 @@ impl<'d, C: Controller, P: PacketPool> ControlRunner<'d, C, P> {
                         }
                         host.state.advertise_command_state.canceled();
                     }
+                    #[cfg(feature = "scan")]
                     CancelledCommandState::Scan(ext) => {
                         trace!("[host] disabling scanning");
                         if ext {
@@ -1916,7 +1964,7 @@ impl<'d, C: Controller, P: PacketPool> ControlRunner<'d, C, P> {
                         }
                         host.state.scan_command_state.canceled();
                     }
-                    #[cfg(feature = "security")]
+                    #[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
                     CancelledCommandState::SyncResolvingList(update) => {
                         host.sync_resolving_list(update).await?;
                     }

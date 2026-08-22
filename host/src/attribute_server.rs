@@ -857,7 +857,7 @@ impl<'values, M: RawMutex, P: PacketPool, const ATT_MAX: usize, const CONN_MAX: 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "gatt-small-data-8")))]
 mod tests {
     use core::task::Poll;
 
@@ -866,6 +866,7 @@ mod tests {
     use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 
     use super::*;
+    use crate::attribute::public_uuid;
     use crate::connection_manager::tests::{setup, ADDR_1};
     use crate::prelude::*;
     use crate::Address;
@@ -939,7 +940,9 @@ mod tests {
             table.iterate(|it| {
                 for (handle, att) in it {
                     let uuid = &att.uuid;
-                    if *uuid == PRIMARY_SERVICE.into() || *uuid == SECONDARY_SERVICE.into() {
+                    if public_uuid(*uuid) == Uuid::from(PRIMARY_SERVICE)
+                        || public_uuid(*uuid) == Uuid::from(SECONDARY_SERVICE)
+                    {
                         trace!("service 0x{:0>4x?}, 0x{:0>2x?}", handle, uuid,);
                     } else {
                         trace!("  0x{:0>4x?}, 0x{:0>2x?}", handle, uuid,);

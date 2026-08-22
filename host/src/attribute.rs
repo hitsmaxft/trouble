@@ -19,8 +19,64 @@ use crate::types::gatt_traits::FromGattError;
 pub use crate::types::uuid::Uuid;
 use crate::{gatt, Error, PacketPool, MAX_INVALID_DATA_LEN};
 
+#[cfg(not(feature = "gatt-uuid16-only"))]
+type AttributeUuid = Uuid;
+
+/// Compact attribute-type UUID storage for constrained 16-bit-only products.
+/// Characteristic/service values and the public GATT API still use `Uuid`.
+#[cfg(feature = "gatt-uuid16-only")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AttributeUuid([u8; 2]);
+
+#[cfg(feature = "gatt-uuid16-only")]
+impl AttributeUuid {
+    pub(crate) fn as_raw(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub(crate) fn get_type(&self) -> u8 {
+        0x01
+    }
+}
+
+#[cfg(feature = "gatt-uuid16-only")]
+impl PartialEq<Uuid> for AttributeUuid {
+    fn eq(&self, other: &Uuid) -> bool {
+        matches!(other, Uuid::Uuid16(value) if value == &self.0)
+    }
+}
+
+#[cfg(feature = "gatt-uuid16-only")]
+fn attribute_uuid(uuid: impl Into<Uuid>) -> AttributeUuid {
+    match uuid.into() {
+        Uuid::Uuid16(value) => AttributeUuid(value),
+        Uuid::Uuid32(_) | Uuid::Uuid128(_) => {
+            panic!("gatt-uuid16-only requires 16-bit attribute UUIDs")
+        }
+    }
+}
+
+#[cfg(not(feature = "gatt-uuid16-only"))]
+fn attribute_uuid(uuid: impl Into<Uuid>) -> AttributeUuid {
+    uuid.into()
+}
+
+#[cfg(feature = "gatt-uuid16-only")]
+pub(crate) fn public_uuid(uuid: AttributeUuid) -> Uuid {
+    Uuid::Uuid16(uuid.0)
+}
+
+#[cfg(not(feature = "gatt-uuid16-only"))]
+pub(crate) fn public_uuid(uuid: AttributeUuid) -> Uuid {
+    uuid
+}
+
 /// The maximum size in bytes of an attribute using inline small data storage.
+#[cfg(not(feature = "gatt-small-data-8"))]
 pub const MAX_SMALL_DATA_SIZE: usize = 20;
+/// Reduced inline value budget for SRAM-constrained products.
+#[cfg(feature = "gatt-small-data-8")]
+pub const MAX_SMALL_DATA_SIZE: usize = 8;
 
 /// Characteristic properties
 #[derive(Debug, Clone, Copy)]
@@ -165,7 +221,7 @@ impl TryFrom<&[u8]> for CharacteristicDeclaration {
 
 /// Attribute metadata.
 pub struct Attribute<'a> {
-    pub(crate) uuid: Uuid,
+    pub(crate) uuid: AttributeUuid,
     pub(crate) permissions: AttPermissions,
     pub(crate) data: AttributeData<'a>,
 }
@@ -219,6 +275,10 @@ pub(crate) enum AttributeData<'d> {
 impl From<Uuid> for AttributeData<'_> {
     fn from(uuid: Uuid) -> Self {
         let raw = uuid.as_raw();
+        assert!(
+            raw.len() <= MAX_SMALL_DATA_SIZE,
+            "configured GATT small-data storage cannot hold this UUID"
+        );
         let len = raw.len() as u8;
         let mut value = [0u8; MAX_SMALL_DATA_SIZE];
         value[..raw.len()].copy_from_slice(raw);
@@ -410,7 +470,7 @@ impl<'a> Attribute<'a> {
         data: T,
     ) -> Attribute<'a> {
         Attribute {
-            uuid: uuid.into(),
+            uuid: attribute_uuid(uuid),
             permissions,
             data: data.into(),
         }
@@ -543,7 +603,7 @@ impl<'d, M: RawMutex, const MAX: usize> AttributeTable<'d, M, MAX> {
     ///
     /// Returns `None` if the attribute handle is invalid.
     pub fn uuid(&self, attribute: u16) -> Option<Uuid> {
-        self.with_attribute(attribute, |att| att.uuid)
+        self.with_attribute(attribute, |att| public_uuid(att.uuid))
     }
 
     pub(crate) fn set_ro(&self, attribute: u16, new_value: &'d [u8]) -> Result<(), Error> {
@@ -644,14 +704,14 @@ impl<'d, M: RawMutex, const MAX: usize> AttributeTable<'d, M, MAX> {
 
         self.iterate_from(handle - 1, |mut it| {
             if let Some((_, att)) = it.next() {
-                if att.uuid == CHARACTERISTIC.into() {
+                if att.uuid == attribute_uuid(CHARACTERISTIC) {
                     let decl = CharacteristicDeclaration::try_from(att.data.value().unwrap())?;
                     let props = decl.props;
                     let uuid = decl.uuid;
                     if it.next().is_some() {
                         let end_handle = it.characteristic_group_end();
                         let cccd_handle = it.next().and_then(|(handle, att)| {
-                            (att.uuid == CLIENT_CHARACTERISTIC_CONFIGURATION.into()).then_some(handle)
+                            (att.uuid == attribute_uuid(CLIENT_CHARACTERISTIC_CONFIGURATION)).then_some(handle)
                         });
 
                         return Ok(Characteristic {
@@ -700,7 +760,7 @@ impl<'d, M: RawMutex, const MAX: usize> AttributeTable<'d, M, MAX> {
 
         self.iterate(|it| {
             for (handle, att) in it {
-                match att.uuid {
+                match public_uuid(att.uuid) {
                     PRIMARY_SERVICE
                     | SECONDARY_SERVICE
                     | INCLUDED_SERVICE
@@ -925,7 +985,7 @@ impl<'d, M: RawMutex, const MAX: usize> ServiceBuilder<'_, 'd, M, MAX> {
             if handle > 0 && table.attributes.len() >= usize::from(handle) {
                 let i = usize::from(handle - 1);
                 let att = &table.attributes[i];
-                let service_uuid = att.uuid;
+                let service_uuid = public_uuid(att.uuid);
                 if service_uuid == Uuid::from(PRIMARY_SERVICE) || service_uuid == Uuid::from(SECONDARY_SERVICE) {
                     let last_handle_in_group = table.service_group_end(handle);
 
@@ -1477,7 +1537,9 @@ impl<'a, 'd> AttributeIterator<'a, 'd> {
             .iter()
             .enumerate()
             .skip(self.pos)
-            .find(|(_, attr)| attr.uuid == PRIMARY_SERVICE.into() || attr.uuid == SECONDARY_SERVICE.into())
+            .find(|(_, attr)| {
+                attr.uuid == attribute_uuid(PRIMARY_SERVICE) || attr.uuid == attribute_uuid(SECONDARY_SERVICE)
+            })
             .map(|(i, _)| i as u16)
             .unwrap_or(u16::MAX)
     }
@@ -1491,9 +1553,9 @@ impl<'a, 'd> AttributeIterator<'a, 'd> {
             .enumerate()
             .skip(self.pos)
             .find(|(_, attr)| {
-                attr.uuid == PRIMARY_SERVICE.into()
-                    || attr.uuid == SECONDARY_SERVICE.into()
-                    || attr.uuid == CHARACTERISTIC.into()
+                attr.uuid == attribute_uuid(PRIMARY_SERVICE)
+                    || attr.uuid == attribute_uuid(SECONDARY_SERVICE)
+                    || attr.uuid == attribute_uuid(CHARACTERISTIC)
             })
             .map(|(i, _)| i as u16)
             .unwrap_or(self.attributes.len() as u16)
@@ -1710,7 +1772,7 @@ impl CCCD {
 mod tests {
     extern crate std;
 
-    #[cfg(feature = "security")]
+    #[cfg(all(feature = "security", not(feature = "gatt-small-data-8")))]
     #[test]
     fn database_hash() {
         use bt_hci::uuid::characteristic::{
@@ -1922,6 +1984,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "gatt-small-data-8"))]
     #[test]
     fn set_updates_variable_length_when_value_fills_backing_storage() {
         use embassy_sync::blocking_mutex::raw::NoopRawMutex;
@@ -1951,6 +2014,7 @@ mod tests {
         assert_eq!(stored.as_slice(), b"wxyz");
     }
 
+    #[cfg(not(feature = "gatt-small-data-8"))]
     #[test]
     fn set_updates_small_variable_length_when_value_reaches_capacity() {
         use embassy_sync::blocking_mutex::raw::NoopRawMutex;
