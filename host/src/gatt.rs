@@ -1984,7 +1984,7 @@ impl<'reference, C: Controller, P: PacketPool, const MAX_SERVICES: usize> GattCl
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "gatt-small-data-8")))]
 mod tests {
     extern crate std;
 

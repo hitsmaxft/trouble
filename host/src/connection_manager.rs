@@ -1054,7 +1054,7 @@ impl<'d, P: PacketPool> ConnectionManager<'d, P> {
                 self.security_manager.cancel_timeout();
             }
             crate::security_manager::SecurityEventData::TimerChange => (),
-            #[cfg(feature = "security")]
+            #[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
             crate::security_manager::SecurityEventData::BondAdded(handle, identity) => {
                 host.resolving_list_state()
                     .borrow_mut()
@@ -1062,6 +1062,12 @@ impl<'d, P: PacketPool> ConnectionManager<'d, P> {
                 // Update the connection's stored peer identity to reflect the identity
                 // address distributed during key exchange, which may differ from the
                 // address seen at connection time (e.g. a temporary RPA).
+                if let Some(mut connection) = self.connection_by_handle_mut(handle) {
+                    connection.peer_identity = identity;
+                }
+            }
+            #[cfg(all(feature = "security", feature = "security-no-address-privacy"))]
+            crate::security_manager::SecurityEventData::BondAdded(handle, identity) => {
                 if let Some(mut connection) = self.connection_by_handle_mut(handle) {
                     connection.peer_identity = identity;
                 }

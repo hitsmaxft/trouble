@@ -34,6 +34,8 @@ mod fmt;
 
 #[cfg(not(any(feature = "central", feature = "peripheral")))]
 compile_error!("Must enable at least one of the `central` or `peripheral` features");
+#[cfg(all(feature = "security-no-address-privacy", feature = "central"))]
+compile_error!("`security-no-address-privacy` is a peripheral-only product profile");
 
 pub mod att;
 #[cfg(feature = "central")]
@@ -823,7 +825,7 @@ impl<'stack, C: Controller, P: PacketPool> StackBuilder<'stack, C, P> {
     /// resolving list is updated automatically the next time advertising, scanning, and
     /// connecting are all idle. Applications should ensure periodic idle windows to allow
     /// resolving list updates to take effect.
-    #[cfg(feature = "security")]
+    #[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
     pub fn enable_privacy(mut self, irk: IdentityResolvingKey) -> Self {
         self.host_state().connections.security_manager.set_local_irk(irk);
         self
@@ -837,8 +839,11 @@ impl<'stack, C: Controller, P: PacketPool> StackBuilder<'stack, C, P> {
     ///
     /// Default is 900 seconds (15 minutes) per the BLE specification.
     #[cfg(feature = "security")]
+    #[allow(unused_mut)]
     pub fn set_rpa_timeout(mut self, timeout: Duration) -> Self {
+        #[cfg(not(feature = "security-no-address-privacy"))]
         self.host_state().rpa_timeout.set(timeout);
+        let _ = timeout;
         self
     }
 
@@ -987,15 +992,23 @@ impl<'stack, C: Controller, P: PacketPool> Stack<'stack, C, P> {
     where
         C: ControllerCmdSync<LeSetResolvablePrivateAddrTimeout>,
     {
-        self.host().rpa_timeout().set(timeout);
-        if self.host().is_initialized() {
-            self.host()
-                .command(LeSetResolvablePrivateAddrTimeout::new(
-                    bt_hci::param::Duration::from_secs(timeout.as_secs() as u32),
-                ))
-                .await?;
+        #[cfg(feature = "security-no-address-privacy")]
+        {
+            let _ = timeout;
+            Ok(())
         }
-        Ok(())
+        #[cfg(not(feature = "security-no-address-privacy"))]
+        {
+            self.host().rpa_timeout().set(timeout);
+            if self.host().is_initialized() {
+                self.host()
+                    .command(LeSetResolvablePrivateAddrTimeout::new(
+                        bt_hci::param::Duration::from_secs(timeout.as_secs() as u32),
+                    ))
+                    .await?;
+            }
+            Ok(())
+        }
     }
 
     /// Run a HCI command and return the response.
@@ -1056,6 +1069,9 @@ impl<'stack, C: Controller, P: PacketPool> Stack<'stack, C, P> {
     /// Check whether BLE address privacy is enabled.
     #[cfg(feature = "security")]
     pub fn is_privacy_enabled(&self) -> bool {
+        #[cfg(feature = "security-no-address-privacy")]
+        return false;
+        #[cfg(not(feature = "security-no-address-privacy"))]
         self.host().is_privacy_enabled()
     }
 
@@ -1067,13 +1083,14 @@ impl<'stack, C: Controller, P: PacketPool> Stack<'stack, C, P> {
     /// connecting are all idle. Applications should ensure periodic idle windows to allow
     /// resolving list updates to take effect.
     pub fn add_bond_information(&self, bond_information: BondInformation) -> Result<(), Error> {
+        #[cfg(not(feature = "security-no-address-privacy"))]
         let identity = bond_information.identity;
         let result = self
             .host()
             .connections()
             .security_manager
             .add_bond_information(bond_information);
-        #[cfg(feature = "security")]
+        #[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
         if result.is_ok() {
             self.host()
                 .resolving_list_state()
@@ -1096,7 +1113,7 @@ impl<'stack, C: Controller, P: PacketPool> Stack<'stack, C, P> {
             .connections()
             .security_manager
             .remove_bond_information(identity);
-        #[cfg(feature = "security")]
+        #[cfg(all(feature = "security", not(feature = "security-no-address-privacy")))]
         if result.is_ok() {
             self.host()
                 .resolving_list_state()
