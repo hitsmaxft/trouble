@@ -104,8 +104,10 @@ security-compact-rng = ["security"]
 # HCI ACL payload no larger than 27 bytes. The caller must enforce the same
 # capability boundary in its controller backend.
 hci-rx-buffer-64 = []
-# Static-address products can keep LE Secure Connections and bond/LTK storage
-# without retaining the controller resolving-list/RPA machinery.
+# Static-address Peripheral, Central, or dual-role products can keep LE Secure
+# Connections and bond/LTK storage without retaining the controller
+# resolving-list/RPA machinery. The application is responsible for using
+# stable peer identities because RPA resolution is deliberately unavailable.
 security-no-address-privacy = ["security"]
 # Enable LE Legacy Pairing (BLE 4.0/4.1 fallback when peer doesn't support Secure Connections)
 legacy-pairing = ["security"]

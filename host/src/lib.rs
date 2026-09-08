@@ -34,9 +34,6 @@ mod fmt;
 
 #[cfg(not(any(feature = "central", feature = "peripheral")))]
 compile_error!("Must enable at least one of the `central` or `peripheral` features");
-#[cfg(all(feature = "security-no-address-privacy", feature = "central"))]
-compile_error!("`security-no-address-privacy` is a peripheral-only product profile");
-
 pub mod att;
 #[cfg(feature = "central")]
 pub mod central;
