@@ -1,4 +1,5 @@
 use core::marker::PhantomData;
+use core::mem::MaybeUninit;
 
 use embassy_sync::blocking_mutex::raw::RawMutex;
 
@@ -157,6 +158,51 @@ impl<'values, M: RawMutex, P: PacketPool, const ATT_MAX: usize, const CONN_MAX: 
             att_table,
             client_att_tables: cccd_tables,
             _p: PhantomData,
+        }
+    }
+
+    /// Move an attribute table from caller-owned static storage into an
+    /// uninitialized server destination without materializing either aggregate
+    /// on the CPU stack.
+    ///
+    /// # Safety
+    ///
+    /// `att_table` must point to a valid initialized table whose ownership is
+    /// transferred to an uninitialized `destination`. The source must not be
+    /// accessed or dropped afterwards.
+    pub unsafe fn init_in_place<'destination>(
+        destination: &'destination mut MaybeUninit<Self>,
+        att_table: *const AttributeTable<'values, M, ATT_MAX>,
+    ) -> &'destination mut Self {
+        let server = destination.as_mut_ptr();
+        unsafe {
+            core::ptr::addr_of_mut!((*server).att_table).write(att_table.read());
+            let table = &*core::ptr::addr_of!((*server).att_table);
+            core::ptr::addr_of_mut!((*server).client_att_tables).write(ClientAttTables::new(table));
+            core::ptr::addr_of_mut!((*server)._p).write(PhantomData);
+            destination.assume_init_mut()
+        }
+    }
+
+    /// Initialize the server in its final storage and populate its embedded
+    /// attribute table without a second full-size transfer object.
+    ///
+    /// # Safety
+    ///
+    /// `destination` must be uninitialized and remain valid for the returned
+    /// reference.
+    pub unsafe fn init_in_place_with<'destination, R>(
+        destination: &'destination mut MaybeUninit<Self>,
+        build: impl FnOnce(&mut AttributeTable<'values, M, ATT_MAX>) -> R,
+    ) -> (&'destination mut Self, R) {
+        let server = destination.as_mut_ptr();
+        unsafe {
+            core::ptr::addr_of_mut!((*server).att_table).write(AttributeTable::new());
+            let table = &mut *core::ptr::addr_of_mut!((*server).att_table);
+            let result = build(table);
+            core::ptr::addr_of_mut!((*server).client_att_tables).write(ClientAttTables::new(table));
+            core::ptr::addr_of_mut!((*server)._p).write(PhantomData);
+            (destination.assume_init_mut(), result)
         }
     }
 
